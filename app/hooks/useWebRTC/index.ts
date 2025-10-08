@@ -11,7 +11,7 @@ const ICE_SERVERS = [
   { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun3.l.google.com:19302" },
   { urls: "stun:stun4.l.google.com:19302" },
-  // Free TURN for testing
+
   {
     urls: "turn:openrelay.metered.ca:80",
     username: "openrelayproject",
@@ -61,8 +61,9 @@ export const useWebRTC = ({
   const isInitiatorRef = useRef<boolean>(false);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const currentChannelRef = useRef<string>("");
+  const isReconnectingRef = useRef<boolean>(false);
 
-  // BUG FIX: Use a ref to track the session status to prevent stale closures.
+
   const isStartedRef = useRef(isStarted);
   useEffect(() => {
     isStartedRef.current = isStarted;
@@ -85,20 +86,25 @@ export const useWebRTC = ({
   }, []);
 
   const cleanup = useCallback((): void => {
+    console.log("🧹 Cleaning up peer connection");
     stopMediaStream();
-    peerRef.current?.destroy();
-    peerRef.current = null;
+    
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    
     setIsConnected(false);
     setConnectionStatus("disconnected");
     setConnectedPeerId(null);
     setError(null);
     setPairRoomId("");
     currentChannelRef.current = "";
+    isReconnectingRef.current = false;
   }, [stopMediaStream]);
 
-  // Matchmaking hooks need to be defined before they are used in `stop`
   const matchmaking = useMatchmaking({
-    onMatchFound: handleMatchFound, // handleMatchFound is defined below
+    onMatchFound: handleMatchFound,
     onError: (error) => {
       setError(error);
       onError(error);
@@ -127,19 +133,30 @@ export const useWebRTC = ({
 
   // Re-enter matchmaking after a disconnect/switch
   const reconnectToMatchmaking = useCallback(async () => {
+    if (isReconnectingRef.current) {
+      console.log("🔄 Reconnection already in progress, skipping");
+      return;
+    }
+    
+    isReconnectingRef.current = true;
     console.log("🔄 Re-entering matchmaking...");
 
-    peerRef.current?.destroy();
-    peerRef.current = null;
-    if (ablyClientRef.current && currentChannelRef.current) {
-      ablyClientRef.current.channels
-        .get(currentChannelRef.current)
-        .unsubscribe();
+    // Properly clean up current connection
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
     }
+    
+    if (ablyClientRef.current && currentChannelRef.current) {
+      const currentChannel = ablyClientRef.current.channels.get(currentChannelRef.current);
+      currentChannel.unsubscribe();
+    }
+    
     setIsConnected(false);
     setConnectedPeerId(null);
     setPairRoomId("");
     currentChannelRef.current = "";
+    setError(null);
 
     setConnectionStatus("connecting");
     onConnectionStatus("connecting");
@@ -152,11 +169,19 @@ export const useWebRTC = ({
       );
       stop();
     }
+    
+    isReconnectingRef.current = false;
   }, [myPeerId, onConnectionStatus, matchmaking, stop]);
 
   // Create peer connection
   const createPeer = useCallback(
     (targetPeerId: string, initiator: boolean) => {
+      // Clean up any existing peer before creating a new one
+      if (peerRef.current) {
+        peerRef.current.destroy();
+        peerRef.current = null;
+      }
+
       console.log(
         `🔗 Creating ${
           initiator ? "initiator" : "responder"
@@ -215,10 +240,12 @@ export const useWebRTC = ({
 
       peer.on("close", () => {
         console.log(`🔌 Connection closed with ${targetPeerId}`);
+        // Only reconnect if we were intentionally connected
         if (isStartedRef.current && connectionStatus === "connected") {
           reconnectToMatchmaking();
         }
       });
+
 
       peerRef.current = peer;
       return peer;
@@ -242,11 +269,9 @@ export const useWebRTC = ({
     roomId: string,
     isInitiator: boolean
   ) {
-    // BUG FIX: If the session was stopped, ignore any lingering match events.
-    if (!isStartedRef.current) {
-      console.warn(
-        " Stale matchmaking event received after session was stopped. Ignoring."
-      );
+    // Check if we're already connected to someone else
+    if (isConnected && connectedPeerId !== matchedPeerId) {
+      console.log("⚠️ Already connected to another peer, ignoring match");
       return;
     }
 
@@ -259,6 +284,13 @@ export const useWebRTC = ({
     isInitiatorRef.current = isInitiator;
     currentChannelRef.current = roomId;
 
+    // Clean up any existing peer connection
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+
+    // Set up new channel for this match
     if (ablyClientRef.current) {
       const pairChannel = ablyClientRef.current.channels.get(roomId);
 
@@ -268,26 +300,27 @@ export const useWebRTC = ({
         if (
           (targetPeerId && targetPeerId !== myPeerId) ||
           fromPeerId === myPeerId
-        )
-          return;
+        ) return;
 
         if (type === "end-chat" && fromPeerId === matchedPeerId) {
-          console.log("👋 Peer ended the chat. Finding a new one.");
+          console.log("👋 Peer ended the chat.");
           reconnectToMatchmaking();
           return;
         }
 
         if (type === "switch-peer" && fromPeerId === matchedPeerId) {
-          console.log("🔄 Peer initiated a switch. Finding a new one.");
+          console.log("🔄 Peer initiated a switch.");
           reconnectToMatchmaking();
           return;
         }
 
         if (type === "signal") {
           if (!peerRef.current && fromPeerId === matchedPeerId) {
+            console.log(`🔗 Creating responder connection for: ${fromPeerId}`);
             createPeer(fromPeerId, false);
           }
           if (peerRef.current && fromPeerId === matchedPeerId) {
+            console.log(`📨 Forwarding signal to peer: ${data.type}`);
             peerRef.current.signal(data);
           }
         }
@@ -427,55 +460,55 @@ export const useWebRTC = ({
       audio: boolean;
       video: boolean;
     }): Promise<void> => {
-         try {
-      setError(null);
-      setConnectionStatus('connecting');
-      onConnectionStatus('connecting');
+      try {
+        setError(null);
+        setConnectionStatus('connecting');
+        onConnectionStatus('connecting');
 
-      const stream = await getMediaStream(callMediaOptions);
-      if (!stream && features.mediaStream) {
-        throw new Error('Failed to get media stream');
-      }
+        const stream = await getMediaStream(callMediaOptions);
+        if (!stream && features.mediaStream) {
+          throw new Error('Failed to get media stream');
+        }
 
-      console.log('✅ Starting P2P call with media');
+        console.log('✅ Starting P2P call with media');
 
-      if (connectionType === 'random') {
-        if (!ablyClientRef.current) {
-          throw new Error('Ably client not initialized');
+        if (connectionType === 'random') {
+          if (!ablyClientRef.current) {
+            throw new Error('Ably client not initialized');
+          }
+          
+          console.log('🎲 Starting random matchmaking for call...');
+          await matchmaking.startSearch(ablyClientRef.current, myPeerId);
+          
+        } else if (connectionType === 'direct' && targetPeerId) {
+          const roomId = `pair-${myPeerId}-${targetPeerId}`;
+          setPairRoomId(roomId);
+          currentChannelRef.current = roomId;
+          
+          if (signalingPublishRef.current) {
+            signaling.sendJoin(signalingPublishRef.current, myPeerId, roomId);
+          }
+          
+          const isInitiator = myPeerId > targetPeerId;
+          isInitiatorRef.current = isInitiator;
+          setConnectedPeerId(targetPeerId);
+          
+          createPeer(targetPeerId, isInitiator);
         }
         
-        console.log('🎲 Starting random matchmaking for call...');
-        await matchmaking.startSearch(ablyClientRef.current, myPeerId);
+        setIsStarted(true);
+        console.log('✅ Call started');
         
-      } else if (connectionType === 'direct' && targetPeerId) {
-        const roomId = `pair-${myPeerId}-${targetPeerId}`;
-        setPairRoomId(roomId);
-        currentChannelRef.current = roomId;
-        
-        if (signalingPublishRef.current) {
-          signaling.sendJoin(signalingPublishRef.current, myPeerId, roomId);
-        }
-        
-        const isInitiator = myPeerId > targetPeerId;
-        isInitiatorRef.current = isInitiator;
-        setConnectedPeerId(targetPeerId);
-        
-        createPeer(targetPeerId, isInitiator);
+      } catch (error) {
+        console.error('❌ Error starting call:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        setError(errorMessage);
+        onError(errorMessage);
+        cleanup();
+        setIsStarted(false);
+        setConnectionStatus('idle');
+        onConnectionStatus('disconnected');
       }
-      
-      setIsStarted(true);
-      console.log('✅ Call started');
-      
-    } catch (error) {
-      console.error('❌ Error starting call:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      setError(errorMessage);
-      onError(errorMessage);
-      cleanup();
-      setIsStarted(false);
-      setConnectionStatus('idle');
-      onConnectionStatus('disconnected');
-    }
     },
     [
       myPeerId,
@@ -506,6 +539,8 @@ export const useWebRTC = ({
 
   const switchPeer = useCallback(() => {
     console.log("🔄 User initiated switch peer.");
+    
+    // First notify the current peer about the switch
     if (signalingPublishRef.current && connectedPeerId) {
       signalingPublishRef.current("webrtc-signal", {
         type: "switch-peer",
@@ -513,8 +548,42 @@ export const useWebRTC = ({
         targetPeerId: connectedPeerId,
       });
     }
-    reconnectToMatchmaking();
-  }, [myPeerId, connectedPeerId, reconnectToMatchmaking]);
+    
+    // Reset connection state before starting new search
+    setIsConnected(false);
+    setConnectionStatus("connecting");
+    setConnectedPeerId(null);
+    setError(null);
+    
+    // Destroy current peer connection if exists
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    
+    // Unsubscribe from current channel
+    if (ablyClientRef.current && currentChannelRef.current) {
+      const currentChannel = ablyClientRef.current.channels.get(currentChannelRef.current);
+      currentChannel.unsubscribe();
+    }
+    
+    // Clear current channel
+    currentChannelRef.current = "";
+    
+    // Now start new matchmaking
+    if (ablyClientRef.current && myPeerId) {
+      matchmaking.startSearch(ablyClientRef.current, myPeerId)
+        .catch(err => {
+          console.error("❌ Error starting new search:", err);
+          setError(err.message);
+          onConnectionStatus("disconnected");
+        });
+    } else {
+      console.error("❌ Ably client or PeerId not available for switch");
+      setError("Connection unavailable");
+      onConnectionStatus("disconnected");
+    }
+  }, [myPeerId, connectedPeerId, matchmaking, onConnectionStatus]);
 
   const sendMessage = useCallback(
     (message: string): void => {
