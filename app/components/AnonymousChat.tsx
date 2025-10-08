@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { useChannel, ChannelProvider } from 'ably/react';
+import { useChannel, useAbly } from 'ably/react';
 import { useWebRTC } from '../hooks/useWebRTC';
 
 interface Message {
@@ -15,6 +15,9 @@ function AnonymousChatInner() {
   const [inputMessage, setInputMessage] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Get Ably client instance
+  const ablyClient = useAbly();
+
   const {
     isStarted,
     isConnected,
@@ -27,10 +30,11 @@ function AnonymousChatInner() {
     sendMessage,
     handleSignalingMessage,
     setSignalingPublish,
+    setAblyClient, 
     localStreamRef,
     peerRef, 
     dataChannelRef,
-    // Call methods are available but not used in this component
+    // Call methods are available but not used
     startCall,
     sendFile,
     toggleMedia,
@@ -38,8 +42,7 @@ function AnonymousChatInner() {
     stopMediaStream,
   } = useWebRTC({
     connectionType: 'random',
-    roomId: 'anonymous-chat-room',
-    // Explicitly configure for messaging only
+
     features: {
       dataChannel: true,    // Enable messaging
       mediaStream: false,   // Disable media for chat-only
@@ -62,16 +65,15 @@ function AnonymousChatInner() {
     },
   });
 
-  // Use Ably channel for signaling
-  const { channel, publish } = useChannel('webrtc-signaling', (ablyMessage) => {
-    console.log('📨 Ably signaling message:', ablyMessage.data);
-    handleSignalingMessage(ablyMessage.data);
-  });
-
-  // Set up signaling publish function
+  // Set Ably client in WebRTC hook
   useEffect(() => {
-    setSignalingPublish(publish);
-  }, [publish, setSignalingPublish]);
+    if (ablyClient) {
+      console.log('✅ Ably connected successfully!');
+      setAblyClient(ablyClient);
+    }
+  }, [ablyClient, setAblyClient]);
+
+
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -102,7 +104,7 @@ function AnonymousChatInner() {
     console.log('🚀 Starting anonymous chat...');
     setMessages([]);
     addSystemMessage('Looking for someone to chat with...');
-    await start(); // Use the generic start method for messaging
+    await start(); // This will trigger matchmaking
   }, [start, addSystemMessage]);
 
   const handleEndChat = useCallback(() => {
@@ -110,7 +112,7 @@ function AnonymousChatInner() {
     if (isConnected) {
       addSystemMessage('Chat ended. Click "Start New Chat" to find someone new.');
     }
-    stop(); // Use the generic stop method
+    stop();
   }, [stop, isConnected, addSystemMessage]);
 
   const handleSendMessage = useCallback(() => {
@@ -196,7 +198,8 @@ function AnonymousChatInner() {
                 {!isStarted ? (
                   <button
                     onClick={handleStartChat}
-                    className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold transition-colors shadow-md"
+                    disabled={!ablyClient}
+                    className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-6 py-2 rounded-lg font-semibold transition-colors shadow-md"
                   >
                     Start New Chat
                   </button>
@@ -345,11 +348,6 @@ function AnonymousChatInner() {
   );
 }
 
-// Outer component that provides the ChannelProvider
 export default function AnonymousChat() {
-  return (
-    <ChannelProvider channelName="webrtc-signaling">
-      <AnonymousChatInner />
-    </ChannelProvider>
-  );
+  return <AnonymousChatInner />;
 }
