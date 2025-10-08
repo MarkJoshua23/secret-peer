@@ -1,18 +1,16 @@
 
 
-# 💬 Whisper
+# 💬 Secret-Peer
 
 > **“Talk freely. No names. No traces.”**
-> or
-> **“A place to be heard, not seen.”**
 
 ---
 
 ## 💡 Core Concept
 
-**Whisper** is a learning project that explores how to use **WebSocket** as a **signaling server** and **WebRTC** for **peer-to-peer (P2P)** real-time communication.
+**Secret-Peer** is a learning project that explores how to use **WebSocket** as a **signaling server** and **WebRTC** for **peer-to-peer (P2P)** real-time communication.
 
-The goal isn’t just technical — it’s human. Whisper creates a **safe, ephemeral space** for people to talk openly without fear, judgment, or exposure.
+The goal isn’t just technical — it’s human. Secret-Peer creates a **safe, ephemeral space** for people to talk openly without fear, judgment, or exposure.
 
 ---
 
@@ -24,7 +22,7 @@ To build a platform where anyone can connect and talk — **anonymously**, **ins
 
 * People often want to talk but don’t know who to talk to.
 * Social anxiety, loneliness, and fear of exposure block honest communication.
-* Whisper offers **human connection without personal risk.**
+* Secret-Peer offers **human connection without personal risk.**
 
 ---
 
@@ -95,8 +93,8 @@ Client A  <--- WebRTC (P2P) --->  Client B
 ### 1️⃣ Clone the Repo
 
 ```bash
-git clone https://github.com/MarkJoshua23/whisper.git
-cd whisper
+git clone https://github.com/MarkJoshua23/secret-peer.git
+cd secret-peer
 ```
 
 ### 2️⃣ Install Dependencies
@@ -119,7 +117,7 @@ Visit
 http://localhost:3000
 ```
 
-and start whispering anonymously 👻
+and start chatting anonymously 👻
 
 ---
 
@@ -138,7 +136,7 @@ and start whispering anonymously 👻
 
 > “People crave connection — without consequence.”
 
-Whisper explores **social vulnerability** through **technical anonymity**.
+Secret-Peer explores **social vulnerability** through **technical anonymity**.
 It’s a tool for learning **how to communicate authentically** — and how to build the **tech** that makes that possible.
 
 ---
