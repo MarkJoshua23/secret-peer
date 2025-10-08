@@ -16,40 +16,51 @@ function AnonymousChatInner() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const {
-  isCallStarted,
-  isConnected,
-  connectionStatus,
-  myPeerId,
-  connectedPeerId,
-  error,
-  startCall,
-  endCall,
-  sendMessage,
-  handleSignalingMessage,
-  setSignalingPublish,
-  localStreamRef,
-  peerRef, 
-  dataChannelRef,
-} = useWebRTC({
-  connectionType: 'random',
-  roomId: 'anonymous-chat-room',
-  onDataChannelMessage: (message: string) => {
-    console.log(`💬 Received message: ${message}`);
-    addMessage(message, 'them');
-  },
-  onConnectionStatus: (status) => {
-    console.log(`🔌 Connection status: ${status}`);
-    if (status === 'disconnected') {
-      addSystemMessage('User disconnected. Finding another user...');
-    } else if (status === 'connected') {
-      addSystemMessage('Connected! You can start chatting now.');
-    }
-  },
-  onError: (error) => {
-    console.error('❌ WebRTC error:', error);
-    addSystemMessage(`Error: ${error}`);
-  },
-});
+    isStarted,
+    isConnected,
+    connectionStatus,
+    myPeerId,
+    connectedPeerId,
+    error,
+    start,
+    stop,
+    sendMessage,
+    handleSignalingMessage,
+    setSignalingPublish,
+    localStreamRef,
+    peerRef, 
+    dataChannelRef,
+    // Call methods are available but not used in this component
+    startCall,
+    sendFile,
+    toggleMedia,
+    getMediaStream,
+    stopMediaStream,
+  } = useWebRTC({
+    connectionType: 'random',
+    roomId: 'anonymous-chat-room',
+    // Explicitly configure for messaging only
+    features: {
+      dataChannel: true,    // Enable messaging
+      mediaStream: false,   // Disable media for chat-only
+    },
+    onDataChannelMessage: (message: string) => {
+      console.log(`💬 Received message: ${message}`);
+      addMessage(message, 'them');
+    },
+    onConnectionStatus: (status) => {
+      console.log(`🔌 Connection status: ${status}`);
+      if (status === 'disconnected') {
+        addSystemMessage('User disconnected. Finding another user...');
+      } else if (status === 'connected') {
+        addSystemMessage('Connected! You can start chatting now.');
+      }
+    },
+    onError: (error) => {
+      console.error('❌ WebRTC error:', error);
+      addSystemMessage(`Error: ${error}`);
+    },
+  });
 
   // Use Ably channel for signaling
   const { channel, publish } = useChannel('webrtc-signaling', (ablyMessage) => {
@@ -91,16 +102,16 @@ function AnonymousChatInner() {
     console.log('🚀 Starting anonymous chat...');
     setMessages([]);
     addSystemMessage('Looking for someone to chat with...');
-    await startCall();
-  }, [startCall, addSystemMessage]);
+    await start(); // Use the generic start method for messaging
+  }, [start, addSystemMessage]);
 
   const handleEndChat = useCallback(() => {
     console.log('🛑 Ending chat...');
     if (isConnected) {
       addSystemMessage('Chat ended. Click "Start New Chat" to find someone new.');
     }
-    endCall();
-  }, [endCall, isConnected, addSystemMessage]);
+    stop(); // Use the generic stop method
+  }, [stop, isConnected, addSystemMessage]);
 
   const handleSendMessage = useCallback(() => {
     if (inputMessage.trim() && isConnected) {
@@ -182,7 +193,7 @@ function AnonymousChatInner() {
                   Your ID: <code className="bg-gray-100 px-2 py-1 rounded text-xs font-mono">{myPeerId}</code>
                 </div>
                 
-                {!isCallStarted ? (
+                {!isStarted ? (
                   <button
                     onClick={handleStartChat}
                     className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold transition-colors shadow-md"

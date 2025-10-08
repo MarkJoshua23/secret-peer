@@ -13,9 +13,18 @@ export interface WebRTCConfig {
 
 export interface UseWebRTCProps {
   // Connection type
-  connectionType?: 'random' | 'private'; // random: connect to anyone, private: connect to specific peer
-  targetPeerId?: string; // For private connections
-  roomId?: string; // For random connections in the same room
+  connectionType?: 'random' | 'private';
+  targetPeerId?: string;
+  roomId?: string;
+  
+  // Feature configuration
+  features?: {
+    dataChannel?: boolean;    // For messaging
+    mediaStream?: boolean;    // For audio/video calls
+  };
+  
+  // Media options (only used if mediaStream is true)
+  mediaOptions?: { audio: boolean; video: boolean };
   
   // Callbacks
   onRemoteStream?: (stream: MediaStream) => void;
@@ -29,26 +38,35 @@ export interface UseWebRTCProps {
 
 export interface UseWebRTCReturn {
   // State
-  isCallStarted: boolean;
+  isStarted: boolean;
   isConnected: boolean;
   connectionStatus: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'rejected';
   myPeerId: string;
   connectedPeerId: string | null;
   error: string | null;
   
-  // Methods
-  startCall: () => Promise<void>;
-  endCall: () => void;
+  // Core methods
+  start: () => Promise<void>;                 // For messging
+  stop: () => void;
   sendMessage: (message: string) => void;
+  
+  // Media methods
+  startCall: (mediaOptions?: { audio: boolean; video: boolean }) => Promise<void>;
+  toggleMedia: (options: { audio?: boolean; video?: boolean }) => Promise<void>;
+  getMediaStream: (options?: { audio: boolean; video: boolean }) => Promise<MediaStream | null>;
+  stopMediaStream: () => void;
+  
+  // Extended methods
+  sendFile: (file: File) => void;
   
   // Signaling
   handleSignalingMessage: (message: any) => void;
   setSignalingPublish: (publish: (name: string, data: any) => void) => void;
   
-  // Refs - Updated for simple-peer
-  localStreamRef: React.MutableRefObject<MediaStream | null>;
-  peerRef: React.MutableRefObject<any | null>; // simple-peer instance
-  dataChannelRef: React.MutableRefObject<any | null>; // Not needed with simple-peer
+  // Refs
+  localStreamRef: React.RefObject<MediaStream | null>;
+  peerRef: React.RefObject<any | null>;
+  dataChannelRef: React.RefObject<any | null>;
 }
 
 export interface SignalingCallbacks {
