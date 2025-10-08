@@ -1,5 +1,5 @@
 export interface SignalMessage {
-  type: 'join' | 'signal' | 'leave' | 'peer-list';
+  type: 'join' | 'signal' | 'leave' | 'peer-list' | 'end-chat' | 'switch-peer';
   data?: any;
   peerId?: string;
   targetPeerId?: string;
@@ -42,6 +42,8 @@ export interface UseWebRTCReturn {
   error: string | null;
   start: () => Promise<void>;
   stop: () => void;
+  endChat: () => void; // Add this function
+  switchPeer: () => void; // Add this function
   sendMessage: (message: string) => void;
   startCall: (callMediaOptions?: { audio: boolean; video: boolean }) => Promise<void>;
   sendFile: (file: File) => void;
