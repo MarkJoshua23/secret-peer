@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import Peer from "simple-peer";
-import { useWebRTCSignaling } from "./useWebRTCSignaling";
 import { useMatchmaking } from "./useMatchMaking";
 import { UseWebRTCProps, UseWebRTCReturn } from "./types";
 import Ably from "ably";
@@ -11,22 +10,21 @@ const ICE_SERVERS = [
   { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun3.l.google.com:19302" },
   { urls: "stun:stun4.l.google.com:19302" },
-
   {
     urls: "turn:openrelay.metered.ca:80",
     username: "openrelayproject",
-    credential: "openrelayproject"
+    credential: "openrelayproject",
   },
   {
-    urls: "turn:openrelay.metered.ca:443", 
+    urls: "turn:openrelay.metered.ca:443",
     username: "openrelayproject",
-    credential: "openrelayproject"
+    credential: "openrelayproject",
   },
   {
     urls: "turn:openrelay.metered.ca:443?transport=tcp",
     username: "openrelayproject",
-    credential: "openrelayproject"
-  }
+    credential: "openrelayproject",
+  },
 ];
 
 export const useWebRTC = ({
@@ -42,610 +40,233 @@ export const useWebRTC = ({
   onError = () => {},
   onDataChannelMessage = () => {},
   onConnectionStatus = () => {},
-}: UseWebRTCProps = {}): UseWebRTCReturn => {
+}: UseWebRTCProps): UseWebRTCReturn => {
   const [isStarted, setIsStarted] = useState<boolean>(false);
-  const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [connectionStatus, setConnectionStatus] = useState<
-    "idle" | "connecting" | "connected" | "disconnected" | "rejected"
-  >("idle");
+  const [connectionStatus, setConnectionStatus] = useState<"idle" | "connecting" | "connected" | "disconnected" | "rejected">("idle");
   const [myPeerId, setMyPeerId] = useState<string>("");
   const [connectedPeerId, setConnectedPeerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pairRoomId, setPairRoomId] = useState<string>("");
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerRef = useRef<Peer.Instance | null>(null);
-  const signalingPublishRef = useRef<
-    ((name: string, data: any) => void) | null
-  >(null);
-  const isInitiatorRef = useRef<boolean>(false);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
-  const currentChannelRef = useRef<string>("");
-  const isReconnectingRef = useRef<boolean>(false);
+  const pairChannelRef = useRef<Ably.RealtimeChannel | null>(null);
+  
+  const closeHandlerRef = useRef<(() => void) | null>(null);
+  
+  const isUnmountingRef = useRef(false);
+  const connectionStatusRef = useRef(connectionStatus);
 
-
-  const isStartedRef = useRef(isStarted);
   useEffect(() => {
-    isStartedRef.current = isStarted;
-  }, [isStarted]);
+    isUnmountingRef.current = false;
+    connectionStatusRef.current = connectionStatus;
+    return () => { isUnmountingRef.current = true; };
+  }, [connectionStatus]);
 
-  // Generate unique peer ID
-  const generatePeerId = useCallback(
-    () => `user-${Math.random().toString(36).substr(2, 8)}`,
-    []
-  );
+  const cleanup = useCallback(() => {
+    console.log("🧹 Cleaning up WebRTC connection...");
+    if (peerRef.current) {
+      if (closeHandlerRef.current) {
+        peerRef.current.off('close', closeHandlerRef.current);
+      }
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    if (pairChannelRef.current) {
+      pairChannelRef.current.unsubscribe();
+      pairChannelRef.current.detach();
+      pairChannelRef.current = null;
+    }
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
 
-  // Initialize peer ID on mount
-  useEffect(() => {
-    setMyPeerId(generatePeerId());
-  }, [generatePeerId]);
+    if (!isUnmountingRef.current) {
+      setConnectedPeerId(null);
+      onConnectionChange(false);
+    }
+  }, [onConnectionChange]);
+  
+  const matchmaking = useMatchmaking({
+    onMatchFound: (matchedPeerId, roomId, isInitiator) => {
+       if (connectionStatusRef.current !== 'connecting') {
+        console.warn(`Match found but in wrong state: ${connectionStatusRef.current}. Ignoring.`);
+        return;
+      }
+      handleMatchFound(matchedPeerId, roomId, isInitiator);
+    },
+    onError: (err) => { 
+      if (!isUnmountingRef.current) {
+        setError(err); 
+        onError(err);
+        setConnectionStatus("disconnected");
+      }
+    },
+  });
+
+  const createPeer = useCallback((targetPeerId: string, initiator: boolean) => {
+    if (peerRef.current) {
+        peerRef.current.destroy();
+        peerRef.current = null;
+    }
+
+    console.log(`🔗 Creating ${initiator ? "initiator" : "responder"} connection to ${targetPeerId}`);
+    const peer = new Peer({
+      initiator,
+      trickle: true,
+      config: { iceServers: ICE_SERVERS },
+      stream: localStreamRef.current || undefined,
+    });
+
+    peer.on("signal", (data) => {
+      console.log(`📤 [SIGNAL SENT] Type: ${data.type}, To: ${targetPeerId}`);
+      pairChannelRef.current?.publish("webrtc-signal", { type: "signal", data, peerId: myPeerId });
+    });
+
+    peer.on("connect", () => {
+      console.log(`✅✅✅✅✅✅✅✅✅✅ CONNECTED to ${targetPeerId} ✅✅✅✅✅✅✅✅✅✅`);
+      if (!isUnmountingRef.current) {
+        setConnectedPeerId(targetPeerId);
+        setConnectionStatus("connected");
+        onConnectionChange(true);
+        onConnectionStatus("connected");
+      }
+    });
+
+    peer.on("data", (data) => onDataChannelMessage(data.toString()));
+    peer.on("stream", (stream) => onRemoteStream(stream));
+
+    peer.on("error", (err) => {
+      console.error("❌ Peer error:", err);
+      if (!isUnmountingRef.current) {
+        setError(err.message);
+        onError(err.message);
+      }
+    });
+
+    const handleClose = () => {
+      console.log(`🔌 Connection closed with ${targetPeerId}`);
+      if (connectionStatusRef.current === 'connected' && !isUnmountingRef.current) {
+        cleanup();
+        setConnectionStatus("disconnected");
+        onConnectionStatus("disconnected");
+      }
+    };
+    closeHandlerRef.current = handleClose;
+    peer.on("close", handleClose);
+
+    peerRef.current = peer;
+    return peer;
+  }, [cleanup, myPeerId, onConnectionChange, onConnectionStatus, onDataChannelMessage, onError, onRemoteStream]);
+
+
+  const start = useCallback(async () => {
+    if (!myPeerId || !ablyClientRef.current) {
+      onError("Connection service not ready.");
+      return;
+    }
+    console.log("🚀🚀🚀 STARTING NEW SEARCH 🚀🚀🚀");
+    setIsStarted(true);
+    setConnectionStatus("connecting");
+    onConnectionStatus("connecting");
+    cleanup();
+    await matchmaking.startSearch(ablyClientRef.current, myPeerId);
+  }, [myPeerId, cleanup, matchmaking, onError, onConnectionStatus]);
+
+  const stop = useCallback(() => {
+    console.log("🛑🛑🛑 STOPPING SESSION 🛑🛑🛑");
+    setIsStarted(false);
+    setConnectionStatus("idle");
+    onConnectionStatus("idle");
+    matchmaking.stopSearch();
+    cleanup();
+  }, [cleanup, matchmaking, onConnectionStatus]);
+  
+  function handleMatchFound(matchedPeerId: string, roomId: string, isInitiator: boolean) {
+    console.log(`🎉 Match found! Paired with ${matchedPeerId}, room: ${roomId}, initiator: ${isInitiator}`);
+    const channel = ablyClientRef.current!.channels.get(roomId);
+    pairChannelRef.current = channel;
+
+    channel.subscribe("webrtc-signal", (message) => {
+      const { type, data, peerId: fromPeerId } = message.data;
+      if (fromPeerId === myPeerId) return;
+
+      if (type === 'end-chat' || type === 'switch-peer') {
+        console.log(`👋 Peer initiated ${type}. Finding new chat...`);
+        start();
+        return;
+      }
+
+      if (type === 'responder-ready' && isInitiator) {
+        console.log("...Initiator confirms responder is ready. Creating initiator peer.");
+        createPeer(matchedPeerId, true);
+        return;
+      }
+
+      if (type === "signal") {
+        if (data.type === 'offer' && !isInitiator && !peerRef.current) {
+          const peer = createPeer(fromPeerId, false);
+          peer.signal(data);
+          return;
+        }
+        if (peerRef.current) {
+          peerRef.current.signal(data);
+        }
+      }
+    });
+
+    if (!isInitiator) {
+      console.log("...I am the responder. Announcing readiness.");
+      channel.publish("webrtc-signal", { type: "responder-ready", peerId: myPeerId });
+    }
+  }
+
+  const endChat = useCallback(async () => {
+    console.log("👋 User initiated end chat.");
+    try {
+      await pairChannelRef.current?.publish("webrtc-signal", { type: "end-chat", peerId: myPeerId });
+    } catch (error) {
+      console.error("Failed to publish end-chat signal:", error);
+    }
+    stop();
+  }, [myPeerId, stop]);
+  
+  const switchPeer = useCallback(async () => {
+    console.log("🔄 User initiated switch peer.");
+    try {
+      await pairChannelRef.current?.publish("webrtc-signal", { type: "switch-peer", peerId: myPeerId });
+    } catch (error) {
+        console.error("Failed to publish switch-peer signal:", error);
+    }
+    start();
+  }, [myPeerId, start]);
+
+  const sendMessage = useCallback((message: string) => {
+    if (peerRef.current?.connected && features.dataChannel) {
+      peerRef.current.send(message);
+    }
+  }, [features.dataChannel]);
+
+  const setAblyClient = useCallback((client: Ably.Realtime) => {
+    ablyClientRef.current = client;
+    if (client?.auth.clientId) {
+      console.log(`🔑 Synchronizing Peer ID with Ably clientId: ${client.auth.clientId}`);
+      setMyPeerId(client.auth.clientId);
+    }
+  }, []);
+
+  const getMediaStream = useCallback(async (options?: { audio?: boolean; video?: boolean; }): Promise<MediaStream | null> => {
+    return localStreamRef.current;
+  }, []);
 
   const stopMediaStream = useCallback((): void => {
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
   }, []);
 
-  const cleanup = useCallback((): void => {
-    console.log("🧹 Cleaning up peer connection");
-    stopMediaStream();
-    
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-    
-    setIsConnected(false);
-    setConnectionStatus("disconnected");
-    setConnectedPeerId(null);
-    setError(null);
-    setPairRoomId("");
-    currentChannelRef.current = "";
-    isReconnectingRef.current = false;
-  }, [stopMediaStream]);
-
-  const matchmaking = useMatchmaking({
-    onMatchFound: handleMatchFound,
-    onError: (error) => {
-      setError(error);
-      onError(error);
-    },
-  });
-
-  const stop = useCallback((): void => {
-    console.log("🛑 Stopping P2P session");
-
-    if (matchmaking.isSearching) {
-      matchmaking.stopSearch();
-    }
-
-    if (ablyClientRef.current && currentChannelRef.current) {
-      const channel = ablyClientRef.current.channels.get(
-        currentChannelRef.current
-      );
-      channel.unsubscribe();
-    }
-
-    cleanup();
-    setIsStarted(false);
-    setConnectionStatus("idle");
-    onConnectionStatus("disconnected");
-  }, [cleanup, onConnectionStatus, matchmaking]);
-
-  // Re-enter matchmaking after a disconnect/switch
-  const reconnectToMatchmaking = useCallback(async () => {
-    if (isReconnectingRef.current) {
-      console.log("🔄 Reconnection already in progress, skipping");
-      return;
-    }
-    
-    isReconnectingRef.current = true;
-    console.log("🔄 Re-entering matchmaking...");
-
-    // Properly clean up current connection
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-    
-    if (ablyClientRef.current && currentChannelRef.current) {
-      const currentChannel = ablyClientRef.current.channels.get(currentChannelRef.current);
-      currentChannel.unsubscribe();
-    }
-    
-    setIsConnected(false);
-    setConnectedPeerId(null);
-    setPairRoomId("");
-    currentChannelRef.current = "";
-    setError(null);
-
-    setConnectionStatus("connecting");
-    onConnectionStatus("connecting");
-
-    if (ablyClientRef.current && myPeerId) {
-      await matchmaking.startSearch(ablyClientRef.current, myPeerId);
-    } else {
-      console.error(
-        "❌ Cannot reconnect to matchmaking, Ably client or PeerId missing. Stopping."
-      );
-      stop();
-    }
-    
-    isReconnectingRef.current = false;
-  }, [myPeerId, onConnectionStatus, matchmaking, stop]);
-
-  // Create peer connection
-  const createPeer = useCallback(
-    (targetPeerId: string, initiator: boolean) => {
-      // Clean up any existing peer before creating a new one
-      if (peerRef.current) {
-        peerRef.current.destroy();
-        peerRef.current = null;
-      }
-
-      console.log(
-        `🔗 Creating ${
-          initiator ? "initiator" : "responder"
-        } connection to ${targetPeerId}`
-      );
-
-      const peerOptions: Peer.Options = {
-        initiator,
-        trickle: true,
-        config: { iceServers: ICE_SERVERS },
-      };
-      if (features.mediaStream && localStreamRef.current) {
-        peerOptions.stream = localStreamRef.current;
-      }
-
-      const peer = new Peer(peerOptions);
-
-      peer.on("signal", (data) => {
-        console.log(`📤 Sending signal to ${targetPeerId}:`, data.type);
-        if (signalingPublishRef.current) {
-          signalingPublishRef.current("webrtc-signal", {
-            type: "signal",
-            data,
-            peerId: myPeerId,
-            targetPeerId,
-          });
-        }
-      });
-
-      peer.on("connect", () => {
-        console.log(`✅ Connected to ${targetPeerId}`);
-        setIsConnected(true);
-        setConnectionStatus("connected");
-        setConnectedPeerId(targetPeerId);
-        onConnectionChange(true);
-        onConnectionStatus("connected");
-      });
-
-      if (features.dataChannel) {
-        peer.on("data", (data) => {
-          const message = data.toString();
-          onDataChannelMessage(message);
-        });
-      }
-
-      if (features.mediaStream) {
-        peer.on("stream", (stream) => onRemoteStream(stream));
-      }
-
-      peer.on("error", (err) => {
-        console.error(`❌ Peer error:`, err);
-        const errorMessage = `Connection error: ${err.message}`;
-        setError(errorMessage);
-        onError(errorMessage);
-      });
-
-      peer.on("close", () => {
-        console.log(`🔌 Connection closed with ${targetPeerId}`);
-        // Only reconnect if we were intentionally connected
-        if (isStartedRef.current && connectionStatus === "connected") {
-          reconnectToMatchmaking();
-        }
-      });
-
-
-      peerRef.current = peer;
-      return peer;
-    },
-    [
-      myPeerId,
-      features,
-      connectionStatus,
-      onRemoteStream,
-      onConnectionChange,
-      onDataChannelMessage,
-      onError,
-      onConnectionStatus,
-      reconnectToMatchmaking,
-    ]
-  );
-
-  // This function can be called by the matchmaking hook at any time.
-  function handleMatchFound(
-    matchedPeerId: string,
-    roomId: string,
-    isInitiator: boolean
-  ) {
-    // Check if we're already connected to someone else
-    if (isConnected && connectedPeerId !== matchedPeerId) {
-      console.log("⚠️ Already connected to another peer, ignoring match");
-      return;
-    }
-
-    console.log(
-      `🎉 Match found! Paired with ${matchedPeerId}, room: ${roomId}, initiator: ${isInitiator}`
-    );
-
-    setPairRoomId(roomId);
-    setConnectedPeerId(matchedPeerId);
-    isInitiatorRef.current = isInitiator;
-    currentChannelRef.current = roomId;
-
-    // Clean up any existing peer connection
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-
-    // Set up new channel for this match
-    if (ablyClientRef.current) {
-      const pairChannel = ablyClientRef.current.channels.get(roomId);
-
-      pairChannel.subscribe("webrtc-signal", (message) => {
-        const { type, peerId: fromPeerId, targetPeerId, data } = message.data;
-
-        if (
-          (targetPeerId && targetPeerId !== myPeerId) ||
-          fromPeerId === myPeerId
-        ) return;
-
-        if (type === "end-chat" && fromPeerId === matchedPeerId) {
-          console.log("👋 Peer ended the chat.");
-          reconnectToMatchmaking();
-          return;
-        }
-
-        if (type === "switch-peer" && fromPeerId === matchedPeerId) {
-          console.log("🔄 Peer initiated a switch.");
-          reconnectToMatchmaking();
-          return;
-        }
-
-        if (type === "signal") {
-          if (!peerRef.current && fromPeerId === matchedPeerId) {
-            console.log(`🔗 Creating responder connection for: ${fromPeerId}`);
-            createPeer(fromPeerId, false);
-          }
-          if (peerRef.current && fromPeerId === matchedPeerId) {
-            console.log(`📨 Forwarding signal to peer: ${data.type}`);
-            peerRef.current.signal(data);
-          }
-        }
-      });
-
-      signalingPublishRef.current = (eventName: string, data: any) =>
-        pairChannel.publish(eventName, data);
-
-      if (isInitiator) {
-        createPeer(matchedPeerId, true);
-      }
-    }
-  }
-
-  const getMediaStream = useCallback(
-    async (options?: {
-      audio?: boolean;
-      video?: boolean;
-    }): Promise<MediaStream | null> => {
-      if (!features.mediaStream && !options) return null;
-
-      try {
-        const streamOptions = {
-          audio: options?.audio ?? mediaOptions.audio ?? false,
-          video: options?.video ?? mediaOptions.video ?? false,
-        };
-        console.log("🎤 Requesting media access...", streamOptions);
-        const stream = await navigator.mediaDevices.getUserMedia(streamOptions);
-        localStreamRef.current = stream;
-        return stream;
-      } catch (error) {
-        console.error("❌ Error getting media stream:", error);
-        const errorMessage =
-          error instanceof Error
-            ? error.message
-            : "Failed to access media devices";
-        setError(errorMessage);
-        onError(errorMessage);
-        return null;
-      }
-    },
-    [features.mediaStream, mediaOptions, onError]
-  );
-
-  const signalingCallbacks = {
-    onJoin: (peerId: string) => {
-      console.log(`👋 Peer ${peerId} joined`);
-    },
-    onLeave: (peerId: string) => {
-      console.log(`👋 Peer ${peerId} left`);
-      if (peerId === connectedPeerId) {
-        peerRef.current?.destroy();
-        setIsConnected(false);
-        setConnectionStatus("disconnected");
-        setConnectedPeerId(null);
-      }
-    },
-    onSignal: (fromPeerId: string, data: any, targetPeerId?: string) => {
-      if (targetPeerId && targetPeerId !== myPeerId) return;
-      if (fromPeerId === myPeerId) return;
-      console.log(`📨 Handling signal from ${fromPeerId}:`, data.type);
-      if (!peerRef.current && fromPeerId === connectedPeerId) {
-        console.log(`🔗 Creating responder connection for: ${fromPeerId}`);
-        createPeer(fromPeerId, false);
-      }
-      if (peerRef.current && fromPeerId === connectedPeerId) {
-        console.log(`📨 Forwarding signal to peer: ${data.type}`);
-        peerRef.current.signal(data);
-      }
-    },
-    onError: (error: string) => {
-      setError(error);
-      onError(error);
-    },
-  };
-
-  const signaling = useWebRTCSignaling(signalingCallbacks);
-
-  const start = useCallback(async (): Promise<void> => {
-    try {
-      setError(null);
-      setConnectionStatus("connecting");
-      onConnectionStatus("connecting");
-      console.log("🔍 Starting connection...");
-
-      if (connectionType === "random") {
-        if (!ablyClientRef.current) {
-          throw new Error("Ably client not initialized");
-        }
-        console.log("🎲 Starting random matchmaking...");
-        await matchmaking.startSearch(ablyClientRef.current, myPeerId);
-      } else if (connectionType === 'direct' && targetPeerId) {
-        const roomId = `pair-${myPeerId}-${targetPeerId}`;
-        setPairRoomId(roomId);
-        currentChannelRef.current = roomId;
-        
-        console.log('🎯 Direct connection mode');
-        
-        if (signalingPublishRef.current) {
-          signaling.sendJoin(signalingPublishRef.current, myPeerId, roomId);
-        }
-        
-        const isInitiator = myPeerId > targetPeerId;
-        isInitiatorRef.current = isInitiator;
-        setConnectedPeerId(targetPeerId);
-        
-        createPeer(targetPeerId, isInitiator);
-      }
-
-      setIsStarted(true);
-      console.log("✅ Connection process started");
-    } catch (error) {
-      console.error("❌ Error starting connection:", error);
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown error";
-      setError(errorMessage);
-      onError(errorMessage);
-      cleanup();
-      setIsStarted(false);
-      setConnectionStatus("idle");
-      onConnectionStatus("disconnected");
-    }
-  }, [
-    myPeerId,
-    connectionType,
-    targetPeerId,
-    cleanup,
-    onError,
-    onConnectionStatus,
-    matchmaking,
-    signaling,
-    createPeer,
-  ]);
-
-  const startCall = useCallback(
-    async (callMediaOptions?: {
-      audio: boolean;
-      video: boolean;
-    }): Promise<void> => {
-      try {
-        setError(null);
-        setConnectionStatus('connecting');
-        onConnectionStatus('connecting');
-
-        const stream = await getMediaStream(callMediaOptions);
-        if (!stream && features.mediaStream) {
-          throw new Error('Failed to get media stream');
-        }
-
-        console.log('✅ Starting P2P call with media');
-
-        if (connectionType === 'random') {
-          if (!ablyClientRef.current) {
-            throw new Error('Ably client not initialized');
-          }
-          
-          console.log('🎲 Starting random matchmaking for call...');
-          await matchmaking.startSearch(ablyClientRef.current, myPeerId);
-          
-        } else if (connectionType === 'direct' && targetPeerId) {
-          const roomId = `pair-${myPeerId}-${targetPeerId}`;
-          setPairRoomId(roomId);
-          currentChannelRef.current = roomId;
-          
-          if (signalingPublishRef.current) {
-            signaling.sendJoin(signalingPublishRef.current, myPeerId, roomId);
-          }
-          
-          const isInitiator = myPeerId > targetPeerId;
-          isInitiatorRef.current = isInitiator;
-          setConnectedPeerId(targetPeerId);
-          
-          createPeer(targetPeerId, isInitiator);
-        }
-        
-        setIsStarted(true);
-        console.log('✅ Call started');
-        
-      } catch (error) {
-        console.error('❌ Error starting call:', error);
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        setError(errorMessage);
-        onError(errorMessage);
-        cleanup();
-        setIsStarted(false);
-        setConnectionStatus('idle');
-        onConnectionStatus('disconnected');
-      }
-    },
-    [
-      myPeerId,
-      connectionType,
-      targetPeerId,
-      cleanup,
-      onError,
-      onConnectionStatus,
-      matchmaking,
-      signaling,
-      getMediaStream,
-      features.mediaStream,
-      createPeer,
-    ]
-  );
-
-  const endChat = useCallback(() => {
-    console.log("🛑 User initiated end chat.");
-    if (signalingPublishRef.current && connectedPeerId) {
-      signalingPublishRef.current("webrtc-signal", {
-        type: "end-chat",
-        peerId: myPeerId,
-        targetPeerId: connectedPeerId,
-      });
-    }
-    stop();
-  }, [myPeerId, connectedPeerId, stop]);
-
-  const switchPeer = useCallback(() => {
-    console.log("🔄 User initiated switch peer.");
-    
-    // First notify the current peer about the switch
-    if (signalingPublishRef.current && connectedPeerId) {
-      signalingPublishRef.current("webrtc-signal", {
-        type: "switch-peer",
-        peerId: myPeerId,
-        targetPeerId: connectedPeerId,
-      });
-    }
-    
-    // Reset connection state before starting new search
-    setIsConnected(false);
-    setConnectionStatus("connecting");
-    setConnectedPeerId(null);
-    setError(null);
-    
-    // Destroy current peer connection if exists
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-    
-    // Unsubscribe from current channel
-    if (ablyClientRef.current && currentChannelRef.current) {
-      const currentChannel = ablyClientRef.current.channels.get(currentChannelRef.current);
-      currentChannel.unsubscribe();
-    }
-    
-    // Clear current channel
-    currentChannelRef.current = "";
-    
-    // Now start new matchmaking
-    if (ablyClientRef.current && myPeerId) {
-      matchmaking.startSearch(ablyClientRef.current, myPeerId)
-        .catch(err => {
-          console.error("❌ Error starting new search:", err);
-          setError(err.message);
-          onConnectionStatus("disconnected");
-        });
-    } else {
-      console.error("❌ Ably client or PeerId not available for switch");
-      setError("Connection unavailable");
-      onConnectionStatus("disconnected");
-    }
-  }, [myPeerId, connectedPeerId, matchmaking, onConnectionStatus]);
-
-  const sendMessage = useCallback(
-    (message: string): void => {
-      if (
-        peerRef.current &&
-        (peerRef.current as any).connected &&
-        features.dataChannel
-      ) {
-        peerRef.current.send(message);
-      } else {
-        console.warn(
-          "⚠️ Cannot send message: peer not connected or data channel disabled"
-        );
-      }
-    },
-    [features.dataChannel]
-  );
-
-  const sendFile = useCallback((file: File): void => {
-    if (!features.dataChannel) {
-      console.warn('⚠️ Data channel not enabled for file sharing');
-      return;
-    }
-    console.log('File sharing not yet implemented', file);
-  }, [features.dataChannel]);
-
-  const toggleMedia = useCallback(async (options: { audio?: boolean; video?: boolean }): Promise<void> => {
-    if (!isStarted) {
-      console.warn('⚠️ Cannot toggle media: session not started');
-      return;
-    }
-    try {
-      const newOptions = { ...mediaOptions, ...options };
-      await getMediaStream(newOptions);
-      console.log('✅ Media toggled', newOptions);
-    } catch (error) {
-      console.error('❌ Error toggling media:', error);
-      onError(`Failed to toggle media: ${error}`);
-    }
-  }, [isStarted, mediaOptions, getMediaStream, onError]);
-
-  const setAblyClient = useCallback((client: Ably.Realtime) => {
-    ablyClientRef.current = client;
-  }, []);
-
-  const handleSignalingMessage = useCallback(
-    (message: any): void => {
-      signaling.handleSignalingMessage(message);
-    },
-    [signaling]
-  );
-
-  const setSignalingPublish = useCallback(
-    (publish: (name: string, data: any) => void) => {
-      signalingPublishRef.current = publish;
-    },
-    []
-  );
 
   return {
     isStarted,
-    isConnected,
+    isConnected: connectionStatus === 'connected',
     connectionStatus,
     myPeerId,
     connectedPeerId,
@@ -655,16 +276,14 @@ export const useWebRTC = ({
     endChat,
     switchPeer,
     sendMessage,
-    startCall,
-    sendFile,
-    toggleMedia,
-    getMediaStream,
-    stopMediaStream,
-    handleSignalingMessage,
-    setSignalingPublish,
     setAblyClient,
     localStreamRef,
     peerRef,
+    startCall: async () => {},
+    sendFile: () => {},
+    toggleMedia: async () => {},
+    stopMediaStream: stopMediaStream,
+    getMediaStream,
     dataChannelRef: { current: null },
   };
 };

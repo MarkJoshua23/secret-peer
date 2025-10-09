@@ -42,17 +42,15 @@ export interface UseWebRTCReturn {
   error: string | null;
   start: () => Promise<void>;
   stop: () => void;
-  endChat: () => void; // Add this function
-  switchPeer: () => void; // Add this function
+  endChat: () => void;
+  switchPeer: () => void;
   sendMessage: (message: string) => void;
   startCall: (callMediaOptions?: { audio: boolean; video: boolean }) => Promise<void>;
   sendFile: (file: File) => void;
   toggleMedia: (options: { audio?: boolean; video?: boolean }) => Promise<void>;
   getMediaStream: (options?: { audio?: boolean; video?: boolean }) => Promise<MediaStream | null>;
   stopMediaStream: () => void;
-  handleSignalingMessage: (message: any) => void;
-  setSignalingPublish: (publish: (name: string, data: any) => void) => void;
-  setAblyClient: (client: any) => void; // Add this
+  setAblyClient: (client: any) => void;
   localStreamRef: React.RefObject<MediaStream | null>;
   peerRef: React.RefObject<any>;
   dataChannelRef: React.RefObject<any>;
